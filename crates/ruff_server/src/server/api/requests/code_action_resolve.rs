@@ -48,9 +48,14 @@ impl super::BackgroundDocumentRequestHandler for CodeActionResolve {
                 snapshot.encoding(),
             )
             .with_failure_code(ErrorCode::InternalError),
-            SupportedCodeActionKind::SourceOrganizeImports => {
-                todo!("Support `source.organizeImports`")
-            }
+            SupportedCodeActionKind::SourceOrganizeImports => resolve_edit_for_organize_imports(
+                action,
+                document,
+                snapshot.url(),
+                snapshot.configuration().linter.clone(),
+                snapshot.encoding(),
+            )
+            .with_failure_code(ErrorCode::InternalError),
             SupportedCodeActionKind::QuickFix => Err(anyhow::anyhow!(
                 "Got a code action that should not need additional resolution: {action_kind:?}"
             ))
@@ -71,6 +76,43 @@ pub(super) fn resolve_edit_for_fix_all(
     let fixes = fixes_for_diagnostics(document, url, encoding, document.version(), diagnostics)?;
 
     action.edit = fix_all_edit(fixes.as_slice());
+
+    Ok(action)
+}
+
+pub(super) fn resolve_edit_for_organize_imports(
+    mut action: types::CodeAction,
+    document: &crate::edit::Document,
+    url: &types::Url,
+    mut linter_settings: ruff_linter::settings::LinterSettings,
+    encoding: PositionEncoding,
+) -> crate::Result<types::CodeAction> {
+    linter_settings.rules = [
+        ruff_linter::registry::Rule::from_code("I001").unwrap(),
+        ruff_linter::registry::Rule::from_code("I002").unwrap(),
+    ]
+    .into_iter()
+    .collect();
+
+    let diagnostics = crate::lint::check(document, &linter_settings, encoding);
+
+    let fixes = crate::lint::fixes_for_diagnostics(
+        document,
+        url,
+        encoding,
+        document.version(),
+        diagnostics,
+    )?;
+
+    action.edit = Some(types::WorkspaceEdit {
+        document_changes: Some(types::DocumentChanges::Edits(
+            fixes
+                .into_iter()
+                .flat_map(|fix| fix.document_edits.into_iter())
+                .collect(),
+        )),
+        ..Default::default()
+    });
 
     Ok(action)
 }
