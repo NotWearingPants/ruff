@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use crate::lint::{fixes_for_diagnostics, DiagnosticFix};
+use crate::lint::fixes_for_diagnostics;
 use crate::server::api::LSPResult;
 use crate::server::SupportedCodeActionKind;
 use crate::server::{client::Notifier, Result};
@@ -9,7 +9,7 @@ use crate::PositionEncoding;
 use lsp_server::ErrorCode;
 use lsp_types::{self as types, request as req};
 use ruff_linter::settings::LinterSettings;
-use types::WorkspaceEdit;
+use types::TextEdit;
 
 pub(crate) struct CodeActionResolve;
 
@@ -71,11 +71,12 @@ pub(super) fn resolve_edit_for_fix_all(
     linter_settings: &LinterSettings,
     encoding: PositionEncoding,
 ) -> crate::Result<types::CodeAction> {
-    let diagnostics = crate::lint::check(document, linter_settings, encoding);
+    let edits = fix_all_edit(document, linter_settings, encoding)?;
 
-    let fixes = fixes_for_diagnostics(document, url, encoding, document.version(), diagnostics)?;
-
-    action.edit = fix_all_edit(fixes.as_slice());
+    action.edit = Some(types::WorkspaceEdit {
+        changes: Some([(url.clone(), edits)].into_iter().collect()),
+        ..Default::default()
+    });
 
     Ok(action)
 }
@@ -84,9 +85,41 @@ pub(super) fn resolve_edit_for_organize_imports(
     mut action: types::CodeAction,
     document: &crate::edit::Document,
     url: &types::Url,
-    mut linter_settings: ruff_linter::settings::LinterSettings,
+    linter_settings: ruff_linter::settings::LinterSettings,
     encoding: PositionEncoding,
 ) -> crate::Result<types::CodeAction> {
+    let edits = organize_all_edit(document, linter_settings, encoding)?;
+
+    action.edit = Some(types::WorkspaceEdit {
+        changes: Some([(url.clone(), edits)].into_iter().collect()),
+        ..Default::default()
+    });
+
+    Ok(action)
+}
+
+pub(super) fn fix_all_edit(
+    document: &crate::edit::Document,
+    linter_settings: &LinterSettings,
+    encoding: PositionEncoding,
+) -> crate::Result<Vec<TextEdit>> {
+    let diagnostics = crate::lint::check(document, linter_settings, encoding);
+
+    let fixes = fixes_for_diagnostics(document, encoding, diagnostics)?;
+
+    Ok(fixes
+        .iter()
+        .filter(|fix| fix.applicability.is_safe())
+        .flat_map(|fixes| fixes.edits.iter())
+        .cloned()
+        .collect())
+}
+
+pub(super) fn organize_all_edit(
+    document: &crate::edit::Document,
+    mut linter_settings: ruff_linter::settings::LinterSettings,
+    encoding: PositionEncoding,
+) -> crate::Result<Vec<TextEdit>> {
     linter_settings.rules = [
         ruff_linter::registry::Rule::from_code("I001").unwrap(),
         ruff_linter::registry::Rule::from_code("I002").unwrap(),
@@ -96,45 +129,10 @@ pub(super) fn resolve_edit_for_organize_imports(
 
     let diagnostics = crate::lint::check(document, &linter_settings, encoding);
 
-    let fixes = crate::lint::fixes_for_diagnostics(
-        document,
-        url,
-        encoding,
-        document.version(),
-        diagnostics,
-    )?;
+    let fixes = crate::lint::fixes_for_diagnostics(document, encoding, diagnostics)?;
 
-    action.edit = Some(types::WorkspaceEdit {
-        document_changes: Some(types::DocumentChanges::Edits(
-            fixes
-                .into_iter()
-                .flat_map(|fix| fix.document_edits.into_iter())
-                .collect(),
-        )),
-        ..Default::default()
-    });
-
-    Ok(action)
-}
-
-fn fix_all_edit(fixes: &[DiagnosticFix]) -> Option<WorkspaceEdit> {
-    let edits_made: Vec<_> = fixes
-        .iter()
-        .filter(|fix| fix.applicability.is_safe())
-        .collect();
-
-    if edits_made.is_empty() {
-        return None;
-    }
-
-    Some(types::WorkspaceEdit {
-        document_changes: Some(types::DocumentChanges::Edits(
-            edits_made
-                .into_iter()
-                .flat_map(|fixes| fixes.document_edits.iter())
-                .cloned()
-                .collect(),
-        )),
-        ..Default::default()
-    })
+    Ok(fixes
+        .into_iter()
+        .flat_map(|fix| fix.edits.into_iter())
+        .collect())
 }
